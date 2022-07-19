@@ -1,2 +1,2 @@
 # chia-toolbox
-Various Tools
+Config Tools
