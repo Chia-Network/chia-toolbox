@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+set -e
+
+
+FEE=20000000
+TAILHEX=./reference_tails/genesis_by_coin_id.clsp.hex
+WALLET_ID=1
+
+while getopts "f:a:m:i:h:t:w:" OPTION; do
+  case $OPTION in
+      f)
+          FINGERPRINT=${OPTARG}
+          ;;
+      a)
+          AMOUNT=${OPTARG}
+          ;;
+      m)
+          FEE=${OPTARG}
+          ;;
+      i)
+          TAIL_ID=${OPTARG}
+          ;;
+      h)
+          TAILHEX=${OPTARG}
+          ;;
+      w)
+          WALLET_ID=${OPTARG}
+          ;;
+      *)
+          echo "Unknow comandline switch: $OPTION"
+          exit 1
+  esac
+done
+
+
+TMPCSV=$(mktemp /tmp/catcsvXXXXXXXXXX)
+WORKDIR_TARGET=CAT-admin-tool
+NET_PREFIX=$(chia rpc full_node get_network_info | jq -r '.network_prefix')
+eval $(chia rpc full_node get_blockchain_state | jq -r '.blockchain_state | {MEMPOOL_SIZE: .mempool_size, MIN_FEE:
+.mempool_min_fees.cost_5000000} | to_entries|map("\(.key)=\(.value|tostring)")|.[]')
+ADDR=$(chia wallet get_address -f "$FINGERPRINT")
+NODE_STATE=$(chia rpc full_node get_blockchain_state | jq '.blockchain_state.sync.synced')
+
+checkMempool() {
+    echo "Checking mempool size..."
+    if [[ $MIN_FEE -gt $FEE ]]; then
+        echo "Mempool size is currently $MEMPOOL_SIZE, and the minimum fee is $MIN_FEE."
+        echo "A transaction fee of at least 20000000 mojos is recommended."
+        exit 1
+    fi
+    echo "Ok!"
+}
+
+checkVenv() {
+    echo "Checking for correct venv..."
+    CURRENT_VENV=$(echo "$VIRTUAL_ENV" | sed 's/^.*CAT-admin-tool\/venv/CAT-admin-tool/g')
+    if [[ -z $VIRTUAL_ENV ]]; then
+        echo "You are not using a virtual env."
+        echo "Please source the venv from $WORKDIR_TARGET."
+        exit 1
+    elif [[ $CURRENT_VENV != CAT-admin-tool ]]; then
+        echo "You are currently using a venv from $CURRENT_VENV."
+        echo "Please deactivate, and source the venv from $WORKDIR_TARGET."
+        exit 1
+    fi
+    echo "Ok!"
+}
+
+checkPath() {
+    echo "Checking for correct path..."
+    GIT_REMOTE=$(git config --get remote.origin.url)
+    REPO=$(echo "${GIT_REMOTE}" | sed -e 's,.*:\(.*/\)\?,,' -e 's/\.git$//')
+    if [[ $REPO != $WORKDIR_TARGET ]]; then
+        echo "You must run this command from the $WORKDIR_TARGET project root."
+        exit 1
+    fi
+    echo "Ok!"
+}
+
+venvDeps() {
+    echo "Setting up venv deps..."
+    STEPS=('--upgrade pip' 'setuptools wheel' '.' 'chia-dev-tools --no-deps' 'pytest')
+    for STEP in "${STEPS[@]}"; do
+        pip install $STEP &> /dev/null
+    done
+    echo "Ok!"
+}
+
+getCsv() {
+    echo "Getting csv snapshot file..."
+    wget -qO- https://cat1-download.chia.net/file/cat1-download/cat1-snapshot.zip | \
+        bsdtar -xOvf- cat1_csv_files/"$TAIL_ID".* > "$TMPCSV"
+    if [[ $? -eq 1 ]]; then
+        echo "Unable to find a .csv file for $TAIL_ID."
+        exit 1
+    fi
+    echo "Ok!"
+}
+
+selectCoin() {
+    cats \
+        -f "$FINGERPRINT" \
+        --tail "$TAILHEX" \
+        --send-to "$ADDR" \
+        --amount "$AMOUNT" \
+        -m "$FEE" \
+        --as-bytes \
+        --select-coin | \
+        sed -n -e 's/^Name: //p'
+}
+
+secureTheBag() {
+    secure_the_bag \
+        --tail "$TAILHEX" \
+        --amount "$AMOUNT" \
+        --secure-the-bag-targets-path "$TMPCSV" \
+        --curry 0x"$COIN_ID" \
+        --prefix "$NET_PREFIX" | \
+        sed -n -e 's/.*hash: /ROOT_HASH=/p; s/.*address: /ROOT_ADDRESS=/p'
+}
+
+makeTheCat() {
+    echo "y" | cats \
+        -f "$FINGERPRINT" \
+        --tail "$TAILHEX" \
+        --send-to "$ROOT_ADDRESS" \
+        --amount "$AMOUNT" \
+        -m "$FEE" \
+        --as-bytes \
+        --curry 0x"$COIN_ID" | \
+        sed -n -e 's/Asset ID: /TAIL_HASH=/p; s/Eve Coin ID: /EVE_COIN=/p'
+}
+
+unwindTheBag() {
+    unwind_the_bag \
+        -f "$FINGERPRINT" \
+        --eve-coin-id "$EVE_COIN" \
+        --tail-hash "$TAIL_HASH" \
+        --secure-the-bag-targets-path "$TMPCSV" \
+        --unwind-fee "$FEE" \
+        --wallet-id "$WALLET_ID"
+}
+
+checkVenv
+checkPath
+venvDeps
+checkMempool
+getCsv
+
+echo "Selecting coin..."
+COIN_ID=$(selectCoin)
+echo "Coin ID: $COIN_ID"
+
+echo "Securing the bag..."
+eval $(secureTheBag)
+echo "Root Hash: $ROOT_HASH"
+echo "Root Address: $ROOT_ADDRESS"
+
+echo "Making the cat..."
+eval $(makeTheCat)
+echo "Asset ID: $ASSET_ID"
+echo "Eve Coin ID $EVE_COIN"
+
+if [[ $NODE_STATE == "true" ]]; then
+    echo "Unwinding the bag..."
+    unwindTheBag
+    rm "$TMPCSV"
+else
+    echo "You need to have a synced full_node. Once synced, you can run:"
+    echo "unwind_the_bag -f $FINGERPRINT --eve-coin-id $EVE_COIN --tail-hash $TAIL_HASH --secure-the-bag-targets-path $TMPCSV --unwind-fee $FEE --wallet-id $WALLET_ID"
+    echo "Leaving $TMPCSV in place."
+    exit 1
+fi
