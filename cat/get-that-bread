@@ -158,7 +158,7 @@ echo "Root Address: $ROOT_ADDRESS"
 
 echo "Making the cat..."
 eval $(makeTheCat)
-echo "Asset ID: $ASSET_ID"
+echo "Asset ID: $TAIL_HASH"
 echo "Eve Coin ID $EVE_COIN"
 
 if [[ $NODE_STATE == "true" ]]; then
